@@ -60,6 +60,26 @@
 #include "../../../../../core/Common/3dParty/openssl/common/common_openssl.h"
 #include "../../../../../core/OfficeCryptReader/source/ECMACryptFile.h"
 
+#ifndef CEF_2623
+#define CEF_V8_SUPPORT_TYPED_ARRAYS
+
+class CAscCefV8ArrayBufferReleaseCallback : public CefV8ArrayBufferReleaseCallback
+{
+public:
+    virtual void ReleaseBuffer(void* buffer) OVERRIDE
+    {
+#if 0
+        FILE* f = fopen("release_log.txt", "a+");
+        fprintf(f, "release\n");
+        fclose(f);
+#endif
+        delete [] ((BYTE*)buffer);
+    }
+
+    IMPLEMENT_REFCOUNTING(CAscCefV8ArrayBufferReleaseCallback);
+};
+#endif
+
 namespace NSCommon
 {
     template <typename Type>
@@ -279,6 +299,33 @@ namespace NSCommon
         for (std::wstring::size_type pos = 0, len = sValue.length(); pos < len; ++pos)
             sRes.append(1, (char)sValue[pos]);
         return sRes;
+    }
+
+    std::string GetFilePathBase64(const std::wstring& sPath)
+    {
+        std::string sPathA = U_TO_UTF8(sPath);
+
+        char* pDataDst = NULL;
+        int nDataDst = 0;
+        NSFile::CBase64Converter::Encode((BYTE*)sPathA.c_str(), (int)sPathA.length(), pDataDst, nDataDst, NSBase64::B64_BASE64_FLAG_NOCRLF);
+
+        std::string sResult = "binary_content://" + std::string(pDataDst, (size_t)nDataDst);
+        RELEASEARRAYOBJECTS(pDataDst);
+        return sResult;
+    }
+
+    std::wstring GetFilePathFromBase64(const std::string& sPath)
+    {
+        int nPrefixLen = 17; // binary_content://
+
+        BYTE* pDataDst = NULL;
+        int nLenDst = 0;
+        NSFile::CBase64Converter::Decode(sPath.c_str() + nPrefixLen, (int)sPath.length() - nPrefixLen, pDataDst, nLenDst);
+
+        std::string sResultA((char*)pDataDst, (size_t)nLenDst);
+        RELEASEARRAYOBJECTS(pDataDst);
+
+        return UTF8_TO_U(sResultA);
     }
 }
 
@@ -974,6 +1021,37 @@ retval, exception);
                     sPath = val->GetStringValue().ToWString();
             }
 
+            if (std::wstring::npos == sPath.find(L"_ea"))
+            {
+                std::string sMainUrl = CefV8Context::GetCurrentContext()->GetFrame()->GetURL().ToString();
+                std::string::size_type posParams = sMainUrl.find("?");
+                if (posParams != std::string::npos)
+                {
+                    std::string::size_type posLang = sMainUrl.find("lang=", posParams);
+                    if (posLang != std::string::npos)
+                    {
+                        posLang += 5;
+                        std::string::size_type posLang2 = sMainUrl.find("&", posLang);
+                        if (posLang2 == std::string::npos)
+                            posLang2 = sMainUrl.length();
+                        std::string sLang = sMainUrl.substr(posLang, posLang2 - posLang);
+
+                        std::string::size_type posSubLang = sLang.find("-");
+                        if (posSubLang != std::string::npos)
+                            sLang = sLang.substr(0, posSubLang);
+
+                        posSubLang = sLang.find("_");
+                        if (posSubLang != std::string::npos)
+                            sLang = sLang.substr(0, posSubLang);
+
+                        if ("zh" == sLang || "ja" == sLang || "ko" == sLang)
+                        {
+                            sPath = L"_ea" + sPath;
+                        }
+                    }
+                }
+            }
+
             std::wstring sUrl = L"ascdesktop://fonts/fonts_thumbnail" + sPath + L".png";
             retval = CefV8Value::CreateString(sUrl);
             return true;
@@ -1012,6 +1090,8 @@ retval, exception);
                 std::wstring sAllFontsVersion = L"";
                 if (nMajorVersion != 0 && nMajorVersion < 6)
                     sAllFontsVersion = L"/AllFonts.js.1";
+                else if (nMajorVersion != 0 && nMajorVersion < 7)
+                    sAllFontsVersion = L"/AllFonts.js.2";
                 else if (CheckSW())
                     sAllFontsVersion = L"/AllFonts.js";
 
@@ -1181,7 +1261,10 @@ DE.controllers.Main.DisableVersionHistory(); \
         else if (name == "Print_Start")
         {
             if (arguments.size() != 4)
+            {
+                m_bIsPrinting = true;
                 return true;
+            }
 
             std::vector<CefRefPtr<CefV8Value> >::const_iterator iter = arguments.begin();
 
@@ -1493,6 +1576,8 @@ DE.controllers.Main.DisableVersionHistory(); \
             message->GetArgumentList()->SetString(0, arguments[0]->GetStringValue());
             message->GetArgumentList()->SetString(1, ((arguments.size() > 1) && arguments[1]->IsString()) ? arguments[1]->GetStringValue() : "");
             message->GetArgumentList()->SetString(2, ((arguments.size() > 2) && arguments[2]->IsString()) ? arguments[2]->GetStringValue() : "");
+            message->GetArgumentList()->SetInt(3, (arguments.size() > 3) ? arguments[3]->GetIntValue() : 0);
+            message->GetArgumentList()->SetString(4, ((arguments.size() > 4) && arguments[4]->IsString()) ? arguments[4]->GetStringValue() : "");
             SEND_MESSAGE_TO_BROWSER_PROCESS(message);
             return true;
         }
@@ -2016,9 +2101,15 @@ window.AscDesktopEditor.cloudCryptoCommandMainFrame=function(a,b){window.cloudCr
             int nPageStart = arguments[3]->GetIntValue();
             int nPageEnd = arguments[4]->GetIntValue();
 
+            if (arguments.size() > 5)
+            {
+                bool bIsDarkMode = arguments[5]->GetBoolValue();
+                m_oNativeViewer.CheckDarkMode(bIsDarkMode);
+            }
+
             std::wstring sUrl = m_oNativeViewer.GetPathPageImage(oInfo);
             if (NSFile::CFileBinary::Exists(sUrl))
-                retval = CefV8Value::CreateString(sUrl);
+                retval = CefV8Value::CreateString(sUrl + m_oNativeViewer.GetUrlAddon());
             else
             {
                 m_oNativeViewer.AddTask(oInfo, nPageStart, nPageEnd);
@@ -3297,6 +3388,8 @@ window.AscDesktopEditor.CallInFrame(\"" + sId + "\", \
                     case AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCX:
                     case AVS_OFFICESTUDIO_FILE_SPREADSHEET_XLSX:
                     case AVS_OFFICESTUDIO_FILE_PRESENTATION_PPTX:
+                    case AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCXF:
+                    case AVS_OFFICESTUDIO_FILE_DOCUMENT_OFORM:
                     {
                         isSupportCrypt = true;
                         break;
@@ -3496,15 +3589,49 @@ window.AscDesktopEditor.CallInFrame(\"" + sId + "\", \
         }
         else if (name == "GetSupportedScaleValues")
         {
-            retval = CefV8Value::CreateArray(3);
+            retval = CefV8Value::CreateArray(5);
             retval->SetValue(0, CefV8Value::CreateDouble(1));
-            retval->SetValue(1, CefV8Value::CreateDouble(1.5));
-            retval->SetValue(2, CefV8Value::CreateDouble(2));
+            retval->SetValue(1, CefV8Value::CreateDouble(1.25));
+            retval->SetValue(2, CefV8Value::CreateDouble(1.5));
+            retval->SetValue(3, CefV8Value::CreateDouble(1.75));
+            retval->SetValue(4, CefV8Value::CreateDouble(2));
             return true;
         }
         else if (name == "GetFontThumbnailHeight")
         {
             retval = CefV8Value::CreateInt(28);
+            return true;
+        }
+        else if (name == "GetOpenedFile")
+        {
+#ifndef CEF_V8_SUPPORT_TYPED_ARRAYS
+            retval = CefV8Value::CreateUndefined();
+#else
+            std::string sPath = arguments[0]->GetStringValue().ToString();
+            std::wstring sFilePath = NSCommon::GetFilePathFromBase64(sPath);
+
+            if (g_pLocalResolver->CheckNoFont(sFilePath))
+            {
+                BYTE* pData = NULL;
+                DWORD dwFileLen = 0;
+                NSFile::CFileBinary::ReadAllBytes(sFilePath, &pData, dwFileLen);
+
+                if (0 != dwFileLen)
+                    retval = CefV8Value::CreateArrayBuffer((void*)pData, (size_t)dwFileLen, new CAscCefV8ArrayBufferReleaseCallback());
+                else
+                    retval = CefV8Value::CreateUndefined();
+            }
+            else
+            {
+                retval = CefV8Value::CreateUndefined();
+            }
+#endif
+            return true;
+        }
+        else if (name == "GetCurrentWindowInfo")
+        {
+            CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("get_current_window_info");
+            SEND_MESSAGE_TO_BROWSER_PROCESS(message);
             return true;
         }
 
@@ -3888,7 +4015,7 @@ class ClientRenderDelegate : public client::ClientAppRenderer::Delegate {
 
     CefRefPtr<CefV8Handler> handler = pWrapper;
 
-    #define EXTEND_METHODS_COUNT 158
+    #define EXTEND_METHODS_COUNT 160
     const char* methods[EXTEND_METHODS_COUNT] = {
         "Copy",
         "Paste",
@@ -4104,6 +4231,10 @@ class ClientRenderDelegate : public client::ClientAppRenderer::Delegate {
         "GetSupportedScaleValues",
         "GetFontThumbnailHeight",
 
+        "GetOpenedFile",
+
+        "GetCurrentWindowInfo",
+
         NULL
     };
 
@@ -4126,6 +4257,8 @@ return navigator.serviceWorker.register2.apply(this, arguments);\n\
 
         curFrame->ExecuteJavaScript("\
 window.addEventListener(\"DOMContentLoaded\", function(){\n\
+//if (window && window.AscCommon && window.AscCommon.checkDeviceScale) return;\n\
+if (window && window.Asc && window.Asc.plugin) return;\n\
 var _style = document.createElement(\"style\");\n\
 _style.type = \"text/css\";\n\
 _style.innerHTML = \"\
@@ -4145,6 +4278,17 @@ document.getElementsByTagName(\"head\")[0].appendChild(_style);\n\
 }, false);\n\
 \n\
 window.AscDesktopEditor.InitJSContext();", curFrame->GetURL(), 0);
+
+#ifndef CEF_VERSION_ABOVE_86
+        curFrame->ExecuteJavaScript("\
+if (!String.prototype.replaceAll) {\
+String.prototype.replaceAll = function (str, newStr) {\
+if (Object.prototype.toString.call(str).toLowerCase() === '[object regexp]')\
+    return this.replace(str, newStr);\
+return this.split(str).join(newStr);\
+};\
+}", curFrame->GetURL(), 0);
+#endif
 
         std::string sVar = pWrapper->m_sRendererProcessVariable.empty() ? "{}" : U_TO_UTF8(pWrapper->m_sRendererProcessVariable);
         NSStringUtils::string_replaceA(sVar, "\n", "");
@@ -4378,7 +4522,20 @@ window.AscDesktopEditor.InitJSContext();", curFrame->GetURL(), 0);
                 _frame->ExecuteJavaScript("window.AscDesktopEditor.LocalFileSetSaved(false);", _frame->GetURL(), 0);
 
             int nFileDataLen = 0;
-            std::string sFileData = GetFileData(sFolder + L"/Editor.bin", nFileDataLen);
+
+            std::wstring sBinaryFile = sFolder + L"/Editor.bin";
+            if (!NSFile::CFileBinary::Exists(sBinaryFile))
+            {
+                std::wstring sBinaryFileCrossPlatform = sFolder + L"/" + NSFile::GetFileName(sFileSrc);
+                if (NSFile::CFileBinary::Exists(sBinaryFileCrossPlatform))
+                    sBinaryFile = sBinaryFileCrossPlatform;
+            }
+
+#ifdef CEF_V8_SUPPORT_TYPED_ARRAYS
+            std::string sFileData = GetFileData2(sBinaryFile, nFileDataLen);
+#else
+            std::string sFileData = GetFileData(sBinaryFile, nFileDataLen);
+#endif
 
             std::string sCode = "window.AscDesktopEditor.LocalFileRecoverFolder(\"" + U_TO_UTF8(sFolderJS) +
                     "\");window.AscDesktopEditor.LocalFileSetSourcePath(\"" + U_TO_UTF8(sFileSrc) + "\");";
@@ -5234,6 +5391,15 @@ private:
     RELEASEARRAYOBJECTS(pData);
 
     return sFileData;
+  }
+
+  std::string GetFileData2(const std::wstring& sFile, int& nLen)
+  {
+    if (m_bIsNativeViewer)
+        return GetFileData(sFile, nLen);
+
+    nLen = 0;
+    return NSCommon::GetFilePathBase64(sFile);
   }
 
  private:

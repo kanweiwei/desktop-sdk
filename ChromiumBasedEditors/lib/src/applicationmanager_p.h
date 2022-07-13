@@ -193,6 +193,68 @@ namespace NSCommon
         }
         return nFormat;
     }
+
+    class CSystemWindowScale
+    {
+    private:
+        static bool g_isUseSystemScalingInit;
+        static bool g_isUseSystemScaling;
+
+    public:
+        static bool IsInit()
+        {
+            return g_isUseSystemScalingInit;
+        }
+
+        static void SetUseSystemScaling(const bool& bIsUse)
+        {
+            g_isUseSystemScalingInit = true;
+            g_isUseSystemScaling = bIsUse;
+        }
+
+        static bool IsUseSystemScaling()
+        {
+            if (g_isUseSystemScalingInit)
+                return g_isUseSystemScaling;
+
+            g_isUseSystemScalingInit = true;
+
+        #ifdef _MAC
+            g_isUseSystemScaling = true;
+        #else
+        #ifdef _LINUX
+            g_isUseSystemScaling = false;
+        #else
+            bool bIsCheckSystem = true; // uncomment for auto-system mode
+
+            if (!bIsCheckSystem)
+            {
+                g_isUseSystemScaling = false;
+                return g_isUseSystemScaling;
+            }
+
+            DWORD nOSVersion = 0;
+            NTSTATUS(WINAPI *RtlGetVersion)(LPOSVERSIONINFOEXW);
+            *(FARPROC*)&RtlGetVersion = GetProcAddress(GetModuleHandleA("ntdll"), "RtlGetVersion");
+
+            if (NULL != RtlGetVersion)
+            {
+                OSVERSIONINFOEXW osInfo;
+                osInfo.dwOSVersionInfoSize = sizeof(osInfo);
+                RtlGetVersion(&osInfo);
+                nOSVersion = osInfo.dwMajorVersion;
+            }
+
+            if (nOSVersion >= 10)
+                g_isUseSystemScaling = true;
+            else
+                g_isUseSystemScaling = false;
+        #endif
+        #endif
+
+            return g_isUseSystemScaling;
+        }
+    };
 }
 
 class CAscReporterData
@@ -219,18 +281,18 @@ public:
 #define DISABLE_LOCK_FUNCTIONALITY
 #endif
 
-namespace NSSystem
-{
 #ifndef _WIN32
 #include <fcntl.h>
 #endif
 
+namespace NSSystem
+{
     class CLocalFileLocker
     {
     private:
         std::wstring m_sFile;
 #ifdef _WIN32
-        NSFile::CFileBinary m_oLocker;
+        HANDLE m_nDescriptor;
 #else
         int m_nDescriptor;
 #endif
@@ -238,11 +300,16 @@ namespace NSSystem
     public:
         CLocalFileLocker(const std::wstring& sFile)
         {
-            m_sFile = sFile;
-#ifndef _WIN32
+#ifdef _WIN32
+            m_nDescriptor = INVALID_HANDLE_VALUE;
+#else
             m_nDescriptor = -1;
 #endif
 
+            if (sFile.empty())
+                return;
+
+            m_sFile = sFile;
             Lock();
         }
         bool Lock()
@@ -252,7 +319,19 @@ namespace NSSystem
 
             Unlock();
 #ifdef _WIN32
-            m_oLocker.OpenFile(m_sFile);
+            std::wstring sFileFull = CorrectPathW(m_sFile);
+            DWORD dwFileAttributes = 0;//GetFileAttributesW(sFileFull.c_str());
+            m_nDescriptor = CreateFileW(sFileFull.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, dwFileAttributes, NULL);
+            if (m_nDescriptor != NULL && m_nDescriptor != INVALID_HANDLE_VALUE)
+            {
+                //LARGE_INTEGER lFileSize;
+                //GetFileSizeEx(m_nDescriptor, &lFileSize);
+                //LockFile(m_nDescriptor, 0, 0, lFileSize.LowPart, (DWORD)lFileSize.HighPart);
+            }
+            else
+            {
+                m_nDescriptor = INVALID_HANDLE_VALUE;
+            }
 #else
             std::string sFileA = U_TO_UTF8(m_sFile);
             m_nDescriptor = open(sFileA.c_str(), O_RDWR | O_EXCL);
@@ -268,6 +347,12 @@ namespace NSSystem
             _lock.l_pid    = getpid();
 
             fcntl(m_nDescriptor, F_SETLKW, &_lock);
+
+            if (!IsLocked(m_sFile))
+            {
+                close(m_nDescriptor);
+                m_nDescriptor = -1;
+            }
 #endif
             return true;
         }
@@ -277,7 +362,15 @@ namespace NSSystem
                 return true;
 
 #ifdef _WIN32
-            m_oLocker.CloseFile();
+            if (INVALID_HANDLE_VALUE != m_nDescriptor)
+            {
+                LARGE_INTEGER lFileSize;
+                GetFileSizeEx(m_nDescriptor, &lFileSize);
+                UnlockFile(m_nDescriptor, 0, 0, lFileSize.LowPart, (DWORD)lFileSize.HighPart);
+
+                CloseHandle(m_nDescriptor);
+                m_nDescriptor = INVALID_HANDLE_VALUE;
+            }            
 #else
             if (-1 == m_nDescriptor)
                 return true;
@@ -292,6 +385,8 @@ namespace NSSystem
 
             fcntl(m_nDescriptor, F_SETLKW, &_lock);
             close(m_nDescriptor);
+
+            m_nDescriptor = -1;
 #endif
             return true;
         }
@@ -348,6 +443,104 @@ namespace NSSystem
 #else
             return true;
 #endif
+        }
+
+        bool SaveFile(const std::wstring& sFile)
+        {
+            bool bIsNeedClose = false;
+
+#ifdef _LINUX
+            int nDescriptor = m_nDescriptor;
+            if (-1 == nDescriptor)
+            {
+                std::string sFileA = U_TO_UTF8(m_sFile);
+                nDescriptor = open(sFileA.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
+                if (-1 == nDescriptor)
+                    nDescriptor = open(sFileA.c_str(), O_CREAT | O_WRONLY, 0666);
+                bIsNeedClose = true;
+            }
+#endif
+
+            DWORD nSection = 10 * 1024 * 1024;
+            DWORD nFileSize = 0;
+
+            NSFile::CFileBinary oFile;
+            if (!oFile.OpenFile(sFile))
+                return false;
+
+            nFileSize = (DWORD)oFile.GetFileSize();
+
+            DWORD nChunkSize = nSection;
+            DWORD nNeedWrite = nFileSize;
+            BYTE* pMemoryBuffer = NULL;
+            if (nFileSize > nSection)
+            {
+                pMemoryBuffer = new BYTE[nSection];
+            }
+            else
+            {
+                nChunkSize = nFileSize;
+                pMemoryBuffer = new BYTE[nFileSize];
+            }
+
+            bool bRes = true;
+#ifdef _WIN32
+            SetFilePointer(m_nDescriptor, 0, 0, FILE_BEGIN);
+#else
+            lseek(nDescriptor, 0, SEEK_SET);
+#endif
+
+            DWORD dwRead = 0;
+            DWORD dwWrite = 0;
+            while (nNeedWrite > 0)
+            {
+                if (nNeedWrite < nChunkSize)
+                    nChunkSize = nNeedWrite;
+                oFile.ReadFile(pMemoryBuffer, nChunkSize, dwRead);
+
+#ifdef _WIN32
+                WriteFile(m_nDescriptor, pMemoryBuffer, nChunkSize, &dwWrite, NULL);
+#else
+                dwWrite = (DWORD)write(nDescriptor, pMemoryBuffer, nChunkSize);
+#endif
+
+                if (dwRead != nChunkSize || dwWrite != nChunkSize)
+                {
+                    bRes = false;
+                    break;
+                }
+
+                nNeedWrite -= nChunkSize;
+            }
+
+            oFile.CloseFile();
+            RELEASEARRAYOBJECTS(pMemoryBuffer);
+
+#ifdef _WIN32
+            SetFilePointer(m_nDescriptor, (LONG)nFileSize, 0, FILE_BEGIN);
+            SetEndOfFile(m_nDescriptor);
+#else
+            lseek(nDescriptor, (DWORD)nFileSize, SEEK_SET);
+            ftruncate(nDescriptor, (DWORD)nFileSize);
+
+            if (bIsNeedClose)
+                close(nDescriptor);
+#endif
+
+            if (!bRes)
+            {
+                Unlock();
+
+#ifdef _WIN32
+                bRes = (0 != ::CopyFileW(sFile.c_str(), m_sFile.c_str(), 0)) ? true : false;
+#else
+                bRes = false;
+#endif
+
+                Lock();
+            }
+
+            return bRes;
         }
     };
 
@@ -643,6 +836,16 @@ public:
         this->nFileType2 = this->nFileType;
         switch (this->nFileType)
         {
+            case AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCX:
+            {
+                std::wstring sFileExt = NSFile::GetFileExtention(fileName);
+                NSCommon::makeLowerW(sFileExt);
+                if (L"oform" == sFileExt)
+                    this->nFileType2 = AVS_OFFICESTUDIO_FILE_DOCUMENT_OFORM;
+                else if (L"docxf" == sFileExt)
+                    this->nFileType2 = AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCXF;
+                break;
+            }
             case AVS_OFFICESTUDIO_FILE_DOCUMENT_TXT:
             {
                 if (!IsOpenAsTxtFile(fileName))
@@ -658,6 +861,16 @@ public:
             default:
                 break;
         }
+
+#ifdef DISABLE_OFORM_SUPPORT
+        if (this->nFileType2 == AVS_OFFICESTUDIO_FILE_DOCUMENT_OFORM ||
+            this->nFileType2 == AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCXF)
+        {
+            this->nFileType2 = AVS_OFFICESTUDIO_FILE_UNKNOWN;
+            return false;
+        }
+#endif
+
         return isOfficeFileBase;
     }
 
@@ -1054,7 +1267,7 @@ protected:
         else
         {
             // старый код. теперь используется вью портала
-            CFileDownloader oDownloader(m_sUrl, false);
+            NSNetwork::NSFileTransport::CFileDownloader oDownloader(m_sUrl, false);
             oDownloader.SetFilePath(m_sDestination);
 
             oDownloader.Start( 0 );
@@ -1240,6 +1453,8 @@ public:
     // флаг для принудительной перегенерации шрифтов (используется при изменении настроек, какие шрифты использовать)
     bool m_bIsUpdateFontsAttack;
 
+    bool m_bIsUseSpellCheckKeyboardInput;
+
     // используется только для Linux snap.
     std::string m_sLD_LIBRARY_PATH;
 
@@ -1336,9 +1551,13 @@ public:
 
         m_bIsOnlyEditorWindowMode = false;
 
+        m_bIsUseSpellCheckKeyboardInput = true;
+
         m_oCS_Scripts.InitializeCriticalSection();
         m_oCS_LocalFiles.InitializeCriticalSection();
         m_oCS_SystemMessages.InitializeCriticalSection();
+
+        COfficeUtils::SetAddonFlag(ZLIB_ADDON_FLAG_WINDOWS_SHARED_WRITE);
     }
     virtual ~CAscApplicationManager_Private()
     {
@@ -1536,6 +1755,27 @@ public:
         std::map<std::string, std::string>::iterator pairEML = _map->find("external-message-loop");
         if (pairEML != _map->end())
             m_bIsUseExternalMessageLoop = ("1" == pairEML->second) ? true : false;
+
+        std::map<std::string, std::string>::iterator pairSpell = _map->find("spell-check-input-mode");
+        if (pairSpell != _map->end())
+            m_bIsUseSpellCheckKeyboardInput = ("0" == pairSpell->second) ? false : true;
+        else
+            m_bIsUseSpellCheckKeyboardInput = true;
+
+        std::map<std::string, std::string>::iterator pairDEBUG = _map->find("ascdesktop-support-debug-info-keep");
+        if (pairDEBUG != _map->end() && "1" == pairDEBUG->second)
+            m_bDebugInfoSupport = true;
+
+        if (!NSCommon::CSystemWindowScale::IsInit())
+        {
+            std::map<std::string, std::string>::iterator pairUseSystemScale = _map->find("system-scale");
+            if (pairUseSystemScale != _map->end() && (NSStringUtils::GetDouble(pairUseSystemScale->second) < 0.5))
+            {
+                NSCommon::CSystemWindowScale::SetUseSystemScaling(false);
+            }
+        }
+
+        m_oKeyboardChecker.SetEnabled(m_bIsUseSpellCheckKeyboardInput);
     }
     void CheckSetting(const std::string& sName, const std::string& sValue)
     {

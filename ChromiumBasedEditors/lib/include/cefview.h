@@ -44,10 +44,11 @@ enum CefViewWrapperType
 
 enum AscEditorType
 {
-    etDocument      = 0,
-    etPresentation  = 1,
-    etSpreadsheet   = 2,
-    etUndefined     = 255
+    etDocument              = 0,
+    etPresentation          = 1,
+    etSpreadsheet           = 2,
+    etDocumentMasterForm    = 3,
+    etUndefined             = 255
 };
 
 class CCefView_Private;
@@ -103,6 +104,7 @@ public:
 
     void resizeEvent();
     void moveEvent();
+    bool isDoubleResizeEvent();
 
     void Apply(NSEditorApi::CAscMenuEvent* );
     NSEditorApi::CAscMenuEvent* ApplySync(NSEditorApi::CAscMenuEvent* );

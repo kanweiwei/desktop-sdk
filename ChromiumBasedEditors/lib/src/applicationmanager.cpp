@@ -33,6 +33,7 @@
 #include "./applicationmanager_p.h"
 #include "./plugins.h"
 #include "./cefwrapper/client_resource_handler_async.h"
+#include "./cefwrapper/monitor_info.h"
 
 #ifdef LINUX
 CApplicationCEF* CLinuxData::app_cef            = NULL;
@@ -91,7 +92,7 @@ CAscApplicationSettings::CAscApplicationSettings()
     user_providers_path             = L"";
 
     converter_application_name      = "ONLYOFFICE";
-    converter_application_company   = "Ascensio System SIA Copyright (c) 2018";
+    converter_application_company   = "Ascensio System SIA Copyright (c) 2022";
 }
 CAscApplicationSettings::~CAscApplicationSettings()
 {
@@ -502,6 +503,17 @@ void CAscApplicationManager::Apply(NSEditorApi::CAscMenuEvent* pEvent)
             }
             break;
         }
+        case ASC_MENU_EVENT_TYPE_DOCUMENTEDITORS_OPENDIRECTORY_DIALOG:
+        {
+            CCefView* pView = GetViewById(((NSEditorApi::CAscCefMenuEvent*)pEvent)->get_SenderId());
+
+            if (NULL != pView)
+            {
+                ADDREFINTERFACE(pEvent);
+                pView->Apply(pEvent);
+            }
+            break;
+        }
         case ASC_MENU_EVENT_TYPE_UI_THREAD_MESSAGE:
         {
             int nId = ((NSEditorApi::CAscCefMenuEvent*)pEvent)->get_SenderId();
@@ -897,6 +909,7 @@ void CAscApplicationManager::OnDestroyWindow()
     m_pInternal->m_nWindowCounter--;
     if (0 == m_pInternal->m_nWindowCounter)
     {
+        CefCookieManager::GetGlobalManager(NULL)->FlushStore(NULL);
         m_pInternal->m_pApplication->ExitMessageLoop();
     }
 }
@@ -914,6 +927,10 @@ int CAscApplicationManager::GetFileFormatByExtentionForSave(const std::wstring& 
     int nFormat = -1;
     if (sName == L"docx")
         nFormat = AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCX;
+    else if (sName == L"docxf")
+        nFormat = AVS_OFFICESTUDIO_FILE_DOCUMENT_DOCXF;
+    else if (sName == L"oform")
+        nFormat = AVS_OFFICESTUDIO_FILE_DOCUMENT_OFORM;
     else if (sName == L"dotx")
         nFormat = AVS_OFFICESTUDIO_FILE_DOCUMENT_DOTX;
     else if (sName == L"odt")
@@ -950,6 +967,10 @@ int CAscApplicationManager::GetFileFormatByExtentionForSave(const std::wstring& 
         nFormat = AVS_OFFICESTUDIO_FILE_DOCUMENT_FB2;
     else if (sName == L"epub")
         nFormat = AVS_OFFICESTUDIO_FILE_DOCUMENT_EPUB;
+    else if (sName == L"png")
+        nFormat = AVS_OFFICESTUDIO_FILE_IMAGE_PNG;
+    else if (sName == L"jpg" || sName == L"jpeg")
+        nFormat = AVS_OFFICESTUDIO_FILE_IMAGE_JPG;
 #ifdef FILE_SAVE_ADDONS
     FILE_SAVE_ADDONS
 #endif
@@ -1103,13 +1124,7 @@ int CAscDpiChecker::GetWidgetImplDpi(CCefViewWidgetImpl* wid, unsigned int* _dx,
 }
 double CAscDpiChecker::GetScale(unsigned int dpiX, unsigned int dpiY)
 {
-    // допустимые значения: 1; 1.5; 2;
-    double dScale = (dpiX + dpiY) / 96.0;
-    int nScale = (int)(dScale + 0.5);
-    double dRetValue = (double)nScale / 2.0;
-    if (dRetValue > 2) dRetValue = 2;
-    if (dRetValue < 1) dRetValue = 1;
-    return dRetValue;
+    return Core_GetMonitorScale(dpiX, dpiY);
 }
 
 double CAscDpiChecker::GetForceScale(unsigned int* dpix, unsigned int* dpiy)
@@ -1193,4 +1208,29 @@ void CAscApplicationManager::AddFileToLocalResolver(const std::wstring& sFile)
 void CAscApplicationManager::SetRendererProcessVariable(const std::wstring& sVariable)
 {
     m_pInternal->m_sRendererJSON = sVariable;
+}
+
+std::wstring CAscApplicationManager::GetExternalSchemeName()
+{
+    if (m_pInternal->m_pAdditional)
+        return m_pInternal->m_pAdditional->GetExternalSchemeName();
+    return L"oo-office";
+}
+
+bool NSCommon::CSystemWindowScale::g_isUseSystemScalingInit = false;
+bool NSCommon::CSystemWindowScale::g_isUseSystemScaling = false;
+
+bool CAscApplicationManager::IsUseSystemScaling()
+{
+    return NSCommon::CSystemWindowScale::IsUseSystemScaling();
+}
+double Core_GetMonitorScale(const unsigned int& xDpi, const unsigned int& yDpi)
+{
+    // допустимые значения: 1; 1.25; 1.5; 1.75; 2;
+    double dScale = (xDpi + yDpi) / (2 * 96.0);
+    int nCount = (int)((dScale + 0.125) / 0.25);
+    dScale = 0.25 * nCount;
+    if (dScale > 2) dScale = 2;
+    if (dScale < 1) dScale = 1;
+    return dScale;
 }
